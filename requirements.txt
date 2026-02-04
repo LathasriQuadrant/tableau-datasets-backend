@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+gunicorn
+pydantic
+azure-storage-blob
+pandas
+numpy
+tableauhyperapi
