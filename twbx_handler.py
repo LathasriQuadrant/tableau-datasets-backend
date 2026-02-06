@@ -11,4 +11,3 @@ def extract_hyper_from_twbx(twbx_path: str, output_dir: str) -> str:
                 return os.path.join(root, file)
 
     raise RuntimeError("No .hyper file found inside TWBX")
-

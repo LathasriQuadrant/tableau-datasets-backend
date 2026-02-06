@@ -3,6 +3,7 @@ from pydantic import BaseModel
 import uuid, tempfile, os
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi import Response
+import shutil
 
 from azure_blob import download_twbx, upload_csv
 from extractor import extract_from_twbx
@@ -31,42 +32,6 @@ def options_handler(path: str):
 class ExtractRequest(BaseModel):
     blob_path: str  # path inside tableau-raw container
 
-# @app.post("/extract-data")
-# def extract_data(req: ExtractRequest):
-#     job_id = str(uuid.uuid4())
-#     work_dir = tempfile.mkdtemp()
-
-#     # Workbook name from file
-#     workbook_name = os.path.splitext(
-#         os.path.basename(req.blob_path)
-#     )[0]
-
-#     # Download TWBX (ALWAYS from tableau-raw)
-#     local_twbx = os.path.join(work_dir, "input.twbx")
-#     download_twbx(req.blob_path, local_twbx)
-
-#     #  Extraction 
-#     result = extract_from_twbx(
-#         local_twbx,
-#         work_dir,
-#         workbook_name
-#     )
-
-#     # Upload CSVs
-#     uploaded = []
-
-#     for csv in result["csv_files"]:
-#         blob_name = f"{workbook_name}/{os.path.basename(csv)}"
-#         uploaded.append(upload_csv(csv, blob_name))
-
-#     return {
-#         "job_id": job_id,
-#         "workbook": workbook_name,
-#         "output_container": "tableau-datasources",
-#         "output_folder": workbook_name,
-#         "output_files": uploaded,
-#         "tables": result["tables"]
-#     }
 
 @app.post("/extract-data")
 def extract_data(req: ExtractRequest):
@@ -75,13 +40,19 @@ def extract_data(req: ExtractRequest):
     print("===== /extract-data called =====")
     print("Request body:", req)
 
+    work_dir = None
     try:
         print("Generating job ID")
         job_id = str(uuid.uuid4())
         print("Job ID:", job_id)
 
-        print("Creating temp directory")
-        work_dir = tempfile.mkdtemp()
+        print("Creating work directory in /home (persistent in Azure)")
+        # Use /home instead of /tmp to avoid Azure automatic cleanup
+        # /tmp in Azure can be cleared unexpectedly, causing Hyper lock file issues
+        base_temp_dir = "/home/site/wwwroot/temp_extractions"
+        os.makedirs(base_temp_dir, exist_ok=True)
+        work_dir = os.path.join(base_temp_dir, job_id)
+        os.makedirs(work_dir, exist_ok=True)
         print("Work dir:", work_dir)
 
         print("Blob path received:", req.blob_path)
@@ -127,4 +98,13 @@ def extract_data(req: ExtractRequest):
         print("❌ ERROR OCCURRED")
         traceback.print_exc()
         return {"error": str(e)}
-
+    
+    finally:
+        # Cleanup temp directory after processing
+        if work_dir and os.path.exists(work_dir):
+            try:
+                print(f"Cleaning up work directory: {work_dir}")
+                shutil.rmtree(work_dir)
+                print("Cleanup completed")
+            except Exception as cleanup_error:
+                print(f"⚠️  Cleanup warning: {cleanup_error}")
