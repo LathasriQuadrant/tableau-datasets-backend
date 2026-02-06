@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
-import uuid, tempfile, os
+import uuid, os
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi import Response
 import shutil
@@ -30,62 +30,105 @@ def options_handler(path: str):
     return Response(status_code=204)
 
 class ExtractRequest(BaseModel):
-    blob_path: str  # path inside tableau-raw container
+    blob_path: str
+
+
+def get_work_directory():
+    """
+    Get appropriate temp directory for current environment.
+    
+    - Azure: /home/site/wwwroot/temp_extractions (persistent)
+    - Local: ./temp_extractions (project folder)
+    - Override: Set EXTRACTION_TEMP_DIR environment variable
+    """
+    if "EXTRACTION_TEMP_DIR" in os.environ:
+        return os.getenv("EXTRACTION_TEMP_DIR")
+    
+    if os.path.exists("/home/site/wwwroot"):
+        return "/home/site/wwwroot/temp_extractions"
+    
+    return os.path.join(os.getcwd(), "temp_extractions")
 
 
 @app.post("/extract-data")
 def extract_data(req: ExtractRequest):
     import traceback
+    import logging
+    import sys
 
-    print("===== /extract-data called =====")
-    print("Request body:", req)
+    # Setup logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format='[%(asctime)s] %(levelname)s: %(message)s',
+        stream=sys.stdout,
+        force=True
+    )
+    logger = logging.getLogger(__name__)
+
+    logger.info("="*70)
+    logger.info("EXTRACTION REQUEST RECEIVED")
+    logger.info(f"Blob path: {req.blob_path}")
+    logger.info("="*70)
 
     work_dir = None
     try:
-        print("Generating job ID")
         job_id = str(uuid.uuid4())
-        print("Job ID:", job_id)
+        logger.info(f"Job ID: {job_id}")
 
-        print("Creating work directory in /home (persistent in Azure)")
-        # Use /home instead of /tmp to avoid Azure automatic cleanup
-        # /tmp in Azure can be cleared unexpectedly, causing Hyper lock file issues
-        base_temp_dir = "/home/site/wwwroot/temp_extractions"
+        base_temp_dir = get_work_directory()
+        logger.info(f"Using temp base: {base_temp_dir}")
+        
         os.makedirs(base_temp_dir, exist_ok=True)
         work_dir = os.path.join(base_temp_dir, job_id)
         os.makedirs(work_dir, exist_ok=True)
-        print("Work dir:", work_dir)
+        logger.info(f"Work dir: {work_dir}")
 
-        print("Blob path received:", req.blob_path)
-
-        workbook_name = os.path.splitext(
-            os.path.basename(req.blob_path)
-        )[0]
-        print("Workbook name:", workbook_name)
+        workbook_name = os.path.splitext(os.path.basename(req.blob_path))[0]
+        logger.info(f"Workbook name: {workbook_name}")
 
         local_twbx = os.path.join(work_dir, "input.twbx")
-        print("Local TWBX path:", local_twbx)
-
-        print("Calling download_twbx()")
+        
+        logger.info("Downloading TWBX...")
         download_twbx(req.blob_path, local_twbx)
-        print("Download completed")
+        logger.info("Download completed")
 
-        print("Calling extract_from_twbx()")
-        result = extract_from_twbx(
-            local_twbx,
-            work_dir,
-            workbook_name
-        )
-        print("Extraction completed")
+        logger.info("Extracting data...")
+        result = extract_from_twbx(local_twbx, work_dir, workbook_name)
+        logger.info(f"Extraction completed - {len(result.get('csv_files'))} CSVs extracted")
 
-        print("CSV files:", result.get("csv_files"))
-
+        logger.info("Uploading CSVs to blob storage...")
         uploaded = []
-        for csv in result.get("csv_files", []):
-            print("Uploading CSV:", csv)
-            blob_name = f"{workbook_name}/{os.path.basename(csv)}"
-            uploaded.append(upload_csv(csv, blob_name))
+        
+        for csv_file in result.get("csv_files", []):
+            csv_filename = os.path.basename(csv_file)
+            
+            # Organize files by schema
+            # If CSV has schema prefix (e.g., "Extract_customers.csv"), extract it
+            if "_" in csv_filename and not csv_filename.startswith("_"):
+                parts = csv_filename.rsplit("_", 1)  # Split from right to handle multi-underscore names
+                if len(parts) == 2:
+                    schema = parts[0]
+                    # Store as: workbook/schema/tablename.csv
+                    blob_name = f"{workbook_name}/{schema}/{csv_filename}"
+                else:
+                    # Fallback if split fails
+                    blob_name = f"{workbook_name}/{csv_filename}"
+            else:
+                # No schema prefix, store directly under workbook
+                blob_name = f"{workbook_name}/{csv_filename}"
+            
+            logger.info(f"Uploading: {csv_filename} → {blob_name}")
+            url = upload_csv(csv_file, blob_name)
+            uploaded.append({
+                "filename": csv_filename,
+                "blob_path": blob_name,
+                "url": url
+            })
+            logger.info(f"Uploaded: {url}")
 
-        print("Upload completed")
+        logger.info("="*70)
+        logger.info(f"EXTRACTION SUCCESS - {len(uploaded)} files uploaded")
+        logger.info("="*70)
 
         return {
             "job_id": job_id,
@@ -95,16 +138,16 @@ def extract_data(req: ExtractRequest):
         }
 
     except Exception as e:
-        print("❌ ERROR OCCURRED")
-        traceback.print_exc()
+        logger.error("="*70)
+        logger.error(f"EXTRACTION FAILED: {str(e)}")
+        logger.error(traceback.format_exc())
+        logger.error("="*70)
         return {"error": str(e)}
     
     finally:
-        # Cleanup temp directory after processing
         if work_dir and os.path.exists(work_dir):
             try:
-                print(f"Cleaning up work directory: {work_dir}")
                 shutil.rmtree(work_dir)
-                print("Cleanup completed")
+                logger.info(f"Cleaned up: {work_dir}")
             except Exception as cleanup_error:
-                print(f"⚠️  Cleanup warning: {cleanup_error}")
+                logger.warning(f"Cleanup warning: {cleanup_error}")
