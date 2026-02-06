@@ -9,15 +9,15 @@ def clean_table_name(name: str) -> str:
     
     Examples:
     - "customers" → "customers"
-    - "customers.csv" → "customers"
+    - "customers.csv" → "customers"  ← Remove .csv extension
     - "customers.csv_8DD21EEE" → "customers"
     - "Extract" → "Extract"
     """
-    # First remove .csv extension if present
+    # Remove .csv extension if present
     if name.endswith(".csv"):
-        name = name[:-4]
+        name = name[:-4]  # Remove last 4 characters (.csv)
     
-    # Then remove any _XXXXXXXX suffix (from exports)
+    # Remove any _XXXXXXXX suffix (from exports)
     if "_" in name:
         base = name.split("_")[0]
         return base
@@ -30,7 +30,6 @@ def normalize(name: str) -> str:
 
 def is_default_schema(schema_name: str) -> bool:
     """Check if schema is a default/empty schema that should be ignored"""
-    # Common default schema names that we should skip
     default_schemas = ["public", "information_schema", "pg_catalog", "sys"]
     return schema_name.lower() in default_schemas
 
